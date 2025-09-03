@@ -1,12 +1,23 @@
 # tools/mall_auto_write.py
 # -*- coding: utf-8 -*-
 r"""
-재다몰 자동 업로드 (리스트→글쓰기 버튼 + 직행 URL 둘 다 지원)
-- .env (루트)에 다음 값 권장:
-    CHROME_USER_DATA_DIR=C:\Users\blueb\AppData\Local\Google\Chrome\User Data
-    CHROME_PROFILE=Profile 18
-    CHROME_FALLBACK_DIR=C:\ChromeProfiles\zaeda_selenium
-- docs/data.xlsx에서 [제목(A), 본문(B)] 중 'DONE/Published/SKIP' 아닌 첫 행을 업로드
+재다몰 자동 업로드 (로그인/권한/버튼-직행 모두 대응)
+
+.env 예시(루트에 두세요)
+--------------------------------
+CHROME_USER_DATA_DIR=C:\Users\blueb\AppData\Local\Google\Chrome\User Data
+CHROME_PROFILE=Profile 18
+CHROME_FALLBACK_DIR=C:\ChromeProfiles\zaeda_selenium
+# 필요 시 게시판 기본값도 바꿀 수 있음
+# ZAEDA_LIST_URL=https://zae-da.com/bbs/list.php?boardid=41
+# ZAEDA_WRITE_URL=https://zae-da.com/bbs/board_write.php?boardid=41
+--------------------------------
+
+동작 개요
+1) .env의 크롬 프로필로 접속(점유 중이면 폴백 디렉터리 생성하여 새 프로필로 실행)
+2) docs/data.xlsx의 첫 미게시 행(상태열 C가 DONE/PUBLISHED/SKIP가 아닌 것)을 가져옴
+3) 글쓰기 페이지 확보(리스트→버튼 클릭 우선, 실패 시 board_write.php 직행)
+4) 제목/본문 입력 → 등록 → 엑셀 상태 DONE 마킹
 """
 
 import os
@@ -31,9 +42,9 @@ from selenium.common.exceptions import (
 )
 from webdriver_manager.chrome import ChromeDriverManager
 
-# ──────────────────────────────
+# ───────────────────────────
 # 상수/경로
-# ──────────────────────────────
+# ───────────────────────────
 load_dotenv()
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,15 +53,16 @@ XLSX = DOCS / "data.xlsx"
 
 MAX_WAIT = 20
 MALL_HOME = "https://zae-da.com/"
-DEFAULT_LIST_URL  = "https://zae-da.com/bbs/list.php?boardid=41"
-DEFAULT_WRITE_URL = "https://zae-da.com/bbs/board_write.php?boardid=41"
+
+DEFAULT_LIST_URL = os.getenv("ZAEDA_LIST_URL", "https://zae-da.com/bbs/list.php?boardid=41")
+DEFAULT_WRITE_URL = os.getenv("ZAEDA_WRITE_URL", "https://zae-da.com/bbs/board_write.php?boardid=41")
 
 def log(msg: str) -> None:
     print(msg, flush=True)
 
-# ──────────────────────────────
+# ───────────────────────────
 # Excel helpers
-# ──────────────────────────────
+# ───────────────────────────
 def load_next_row():
     if not XLSX.exists():
         raise FileNotFoundError(f"엑셀 파일이 없습니다: {XLSX}")
@@ -69,9 +81,9 @@ def mark_done(wb, ws, row: int):
     ws[f"D{row}"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     wb.save(XLSX)
 
-# ──────────────────────────────
+# ───────────────────────────
 # Selenium helpers
-# ──────────────────────────────
+# ───────────────────────────
 def make_options(user_data_dir: str | None, profile_dir: str | None):
     opts = ChromeOptions()
     if user_data_dir:
@@ -79,7 +91,6 @@ def make_options(user_data_dir: str | None, profile_dir: str | None):
     if profile_dir:
         opts.add_argument(f"--profile-directory={profile_dir}")
 
-    # 안정/호환 옵션
     opts.add_argument("--start-maximized")
     opts.add_argument("--no-first-run")
     opts.add_argument("--no-default-browser-check")
@@ -88,7 +99,7 @@ def make_options(user_data_dir: str | None, profile_dir: str | None):
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--remote-allow-origins=*")
-    # opts.add_argument("--no-sandbox")  # 필요 시
+    # 필요 시 opts.add_argument("--no-sandbox")
 
     # 디버깅 편의
     opts.add_experimental_option("detach", True)
@@ -162,7 +173,7 @@ def is_write_form_visible(drv) -> bool:
         return False
 
 def ensure_login_interactive(drv, target_url: str = MALL_HOME):
-    """홈으로 보내 로그인 유도(콘솔 Enter 대기)."""
+    """홈(or 대상 URL)으로 보내 로그인 유도(콘솔 Enter 대기)."""
     drv.get(target_url)
     wait_ready(drv)
     print("\n────────────────────────────────────────")
@@ -174,27 +185,20 @@ def ensure_login_interactive(drv, target_url: str = MALL_HOME):
     except EOFError:
         time.sleep(10)
 
-# ───────────── 리스트 → 글쓰기 버튼 클릭 (스샷 기반 셀렉터 우선) ─────────────
+# ───────── 리스트 → 글쓰기 버튼 클릭 (스샷 기반 셀렉터 우선) ─────────
 def goto_write_from_list(drv, list_url: str) -> bool:
     """
     /bbs/list.php?boardid=41 페이지에서 '글쓰기' 버튼 클릭 → 에디터 진입
+    로그인 안 되어 있거나 권한 없으면 로그인 유도 후 재시도
     """
     drv.get(list_url)
     wait_ready(drv)
 
-    # 로그인 필요하면 유도
-    if ("login" in drv.current_url.lower()) or ("로그인" in drv.page_source and "회원" in drv.page_source):
-        log("⚠️ 로그인 필요 → 로그인 유도")
-        ensure_login_interactive(drv, list_url)
-        drv.get(list_url)
-        wait_ready(drv)
-
-    candidates = [
-        # ✅ 스샷 기반 최우선 (div.rbt_box 내부 a.btn_lsmall[href*='write.php'])
+    selectors = [
+        # ✅ 스샷 기반 최우선: div.rbt_box 내부의 "글쓰기" a 버튼
         (By.CSS_SELECTOR, ".rbt_box a.btn_lsmall[href*='write.php']"),
         (By.CSS_SELECTOR, ".rbt_box a[href*='write.php']"),
         (By.XPATH, "//div[contains(@class,'rbt_box')]//a[contains(@href,'write.php')]"),
-
         # 🔁 백업
         (By.XPATH, "//a[contains(.,'글쓰기')]"),
         (By.XPATH, "//button[contains(.,'글쓰기')]"),
@@ -203,18 +207,38 @@ def goto_write_from_list(drv, list_url: str) -> bool:
         (By.XPATH, "//img[contains(@alt,'글쓰기')]/ancestor::a"),
     ]
 
-    for by, sel in candidates:
+    def try_click(by, sel):
+        btn = WebDriverWait(drv, 6).until(EC.presence_of_element_located((by, sel)))
+        href = (btn.get_attribute("href") or "").lower()
+        # a인데 href가 login으로 향하거나, 클릭 불가면 로그인 필요 판단
+        if "login" in href:
+            return "need_login"
+        drv.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
         try:
-            elem = WebDriverWait(drv, 6).until(EC.presence_of_element_located((by, sel)))
-            drv.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
-            try:
-                drv.execute_script("arguments[0].click();", elem)     # 1차 JS 클릭
-            except Exception:
-                WebDriverWait(drv, 3).until(EC.element_to_be_clickable((by, sel))).click()  # 2차 일반 클릭
-            wait_ready(drv)
-            if is_write_form_visible(drv):
+            WebDriverWait(drv, 3).until(EC.element_to_be_clickable((by, sel)))
+        except TimeoutException:
+            return "need_login"
+        try:
+            drv.execute_script("arguments[0].click();", btn)
+        except Exception:
+            btn.click()
+        wait_ready(drv)
+        return "ok"
+
+    for by, sel in selectors:
+        try:
+            res = try_click(by, sel)
+            if res == "ok" and is_write_form_visible(drv):
                 log("✅ 글쓰기 페이지(리스트→버튼) 진입 성공")
                 return True
+            if res == "need_login":
+                log("⚠️ 글쓰기 버튼 비활성/로그인 필요 감지")
+                ensure_login_interactive(drv, list_url)
+                drv.get(list_url); wait_ready(drv)
+                res2 = try_click(by, sel)
+                if res2 == "ok" and is_write_form_visible(drv):
+                    log("✅ (로그인 후) 글쓰기 페이지 진입 성공")
+                    return True
         except Exception:
             accept_all_alerts(drv)
             continue
@@ -222,12 +246,18 @@ def goto_write_from_list(drv, list_url: str) -> bool:
     return is_write_form_visible(drv)
 
 def try_direct_write_url(drv, write_url: str) -> bool:
-    """board_write.php 직행 시도."""
+    """board_write.php 직행(로그인 리다이렉트 감지 시 유도 후 재시도)"""
     drv.get(write_url)
     try:
         wait_ready(drv)
     except Exception:
         accept_all_alerts(drv)
+
+    page = (drv.page_source or "").lower()
+    if ("login" in drv.current_url.lower()) or ("로그인" in page and "회원" in page):
+        log("⚠️ 직행 → 로그인 페이지 감지")
+        ensure_login_interactive(drv, write_url)
+        drv.get(write_url); wait_ready(drv)
 
     if is_write_form_visible(drv):
         log("✅ 글쓰기 페이지(직행) 진입 성공")
@@ -235,20 +265,14 @@ def try_direct_write_url(drv, write_url: str) -> bool:
 
     accept_all_alerts(drv)
     time.sleep(0.2)
-    if is_write_form_visible(drv):
-        log("✅ 글쓰기 페이지(직행) 진입 성공")
-        return True
-
-    log("↪ 직행 진입 실패(로그인/권한/리다이렉트 필요 가능)")
-    return False
+    return is_write_form_visible(drv)
 
 def ensure_write_page(drv, list_url: str, write_url: str) -> None:
     """
     우선순위:
       ① 리스트 페이지 → '글쓰기' 버튼 클릭
-      ② 실패 시 board_write.php 직행
+      ② 실패 시 board_write.php 직행 (list→write 치환 주소도 함께 시도)
     """
-    # list.php → board_write.php 변환 (직행 재시도용)
     derived_write_url = write_url
     if "list.php" in list_url and "board_write.php" not in write_url:
         derived_write_url = list_url.replace("list.php", "board_write.php")
@@ -258,7 +282,7 @@ def ensure_write_page(drv, list_url: str, write_url: str) -> None:
         return
 
     log("↪ 리스트→버튼 경로 실패, 직행 URL로 재시도합니다…")
-    # ② 직행 (우선 전달된 write_url, 없으면 유도된 주소)
+    # ② 직행
     if try_direct_write_url(drv, write_url) or try_direct_write_url(drv, derived_write_url):
         return
 
@@ -266,9 +290,9 @@ def ensure_write_page(drv, list_url: str, write_url: str) -> None:
     print("   - 로그인/권한/게시판 설정을 확인해 주세요.", flush=True)
     raise SystemExit(1)
 
-# ──────────────────────────────
+# ───────────────────────────
 # Main
-# ──────────────────────────────
+# ───────────────────────────
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--list-url",  default=DEFAULT_LIST_URL,  help="게시판 목록 URL (list.php)")
