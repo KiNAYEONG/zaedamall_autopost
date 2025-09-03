@@ -1,0 +1,19 @@
+# 가상환경 & 캐시
+.venv/
+__pycache__/
+*.pyc
+
+# 시스템 파일
+.DS_Store
+Thumbs.db
+
+# 데이터/결과물
+docs/*.xlsx
+*.log
+bench_out/
+_shot_*.png
+
+# 크롬 프로필 (자동화 전용)
+C:/ChromeProfiles/
+C:\ChromeProfiles\
+.env
