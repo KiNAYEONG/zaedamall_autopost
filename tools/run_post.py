@@ -1,8 +1,9 @@
+# tools/run_post.py
 # -*- coding: utf-8 -*-
 """
-원클릭 재다몰 업로드 실행기 (시크릿 모드 전용)
+원클릭 재다몰 업로드 실행기
 - docs/data.xlsx 없으면 자동 생성 + 본문 채우기
-- auto_write.py 호출 (시크릿 모드 크롬 실행)
+- auto_write.py 호출 (기본: 시크릿 모드)
 
 환경변수(선택):
   ZAEDA_WRITE_URL   : 글쓰기 URL (기본값 아래)
@@ -17,7 +18,8 @@ TOOLS = ROOT / "tools"
 DOCS  = ROOT / "docs"
 XLSX  = DOCS / "data.xlsx"
 
-DEFAULT_URL = "https://zae-da.com/bbs/board_write.php?boardid=41"
+# ✅ 실제 글쓰기 URL
+DEFAULT_URL = "https://zae-da.com/bbs/write.php?boardid=41"
 
 def run(cmd: list[str], check=True):
     print("▶", " ".join(str(c) for c in cmd), flush=True)
@@ -28,9 +30,6 @@ def main():
 
     # 0) 기본 값 준비
     write_url = os.getenv("ZAEDA_WRITE_URL", DEFAULT_URL)
-
-    # ⛔ 프로필 강제 세팅 제거 → 항상 시크릿 모드 실행
-    # os.environ.setdefault("ZAEDA_PROFILE_DIR", r"C:\ChromeProfiles\zaeda")
 
     # 1) 데이터 파일 없으면 샘플 생성
     if not XLSX.exists():

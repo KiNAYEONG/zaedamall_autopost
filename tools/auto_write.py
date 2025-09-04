@@ -1,3 +1,4 @@
+# tools/auto_write.py
 # -*- coding: utf-8 -*-
 """
 재다몰 글쓰기 자동화 (Selenium + Excel 연동 + 자동 로그인 + 시크릿 모드)
@@ -6,7 +7,6 @@
 from __future__ import annotations
 import os, time, random, argparse, datetime as dt
 from pathlib import Path
-from typing import List
 import openpyxl, requests
 
 from selenium.webdriver import Chrome
@@ -80,13 +80,6 @@ def setup_driver() -> Chrome:
     # 🚀 시크릿 모드
     opts.add_argument("--incognito")
 
-    # PC User-Agent 강제
-    opts.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
-
     log("🌐 Chrome 실행 준비 중 (시크릿 모드)...")
     drv = Chrome(service=Service(ChromeDriverManager().install()), options=opts)
     time.sleep(2)
@@ -111,10 +104,7 @@ def auto_login(drv: Chrome, target_url: str) -> bool:
 
         id_input = drv.find_element(By.ID, "login_id")
         pw_input = drv.find_element(By.ID, "login_pw")
-        try: id_input.clear()
-        except: pass
-        try: pw_input.clear()
-        except: pass
+        id_input.clear(); pw_input.clear()
         id_input.send_keys(user)
         pw_input.send_keys(pw)
 
@@ -129,15 +119,9 @@ def auto_login(drv: Chrome, target_url: str) -> bool:
         if "로그아웃" in drv.page_source:
             log("🔓 로그인 성공 감지됨")
             drv.get(target_url)
+            time.sleep(2)
+            log(f"📍 현재 URL: {drv.current_url}")
             return True
-
-        try:
-            alert = drv.switch_to.alert
-            msg = alert.text
-            log(f"⚠️ 로그인 실패 알럿 감지: {msg}")
-            alert.accept()
-        except Exception:
-            log("⚠️ 로그인 실패 → 알럿 없음")
 
         return False
 
@@ -146,39 +130,34 @@ def auto_login(drv: Chrome, target_url: str) -> bool:
         return False
 
 # --------------------------
-# 이미지
-# --------------------------
-def build_unsplash_remote_urls(query: str, n: int) -> List[str]:
-    base = "https://source.unsplash.com/900x600"
-    return [
-        f"{base}/?{requests.utils.quote(query)}&sig={random.randint(1,999999)}"
-        for _ in range(n)
-    ]
-
-# --------------------------
 # 작성/제출
 # --------------------------
 def fill_title(drv, title: str):
-    inputs = drv.find_elements(By.CSS_SELECTOR, "input[type='text']")
-    if not inputs:
-        raise NoSuchElementException("제목 입력창 없음")
-    target = max(inputs, key=lambda e: e.size.get("width", 0))
-    target.clear()
-    target.send_keys(title)
+    try:
+        el = drv.find_element(By.NAME, "wr_subject")
+    except:
+        try:
+            el = drv.find_element(By.ID, "wr_subject")
+        except:
+            inputs = drv.find_elements(By.CSS_SELECTOR, "input[type='text']")
+            if not inputs:
+                raise NoSuchElementException("제목 입력창 없음")
+            el = max(inputs, key=lambda e: e.size.get("width", 0))
+    el.clear()
+    el.send_keys(title)
     log("📝 제목 입력 완료")
 
 def fill_body(drv, body_text: str):
     try:
+        ta = drv.find_element(By.NAME, "wr_content")
+    except:
         ta = drv.find_element(By.CSS_SELECTOR, "textarea")
-        ta.clear()
-        ta.send_keys(body_text)
-        log("📄 본문 입력 완료")
-    except Exception:
-        log("⚠️ 본문 입력 실패")
+    ta.clear()
+    ta.send_keys(body_text)
+    log("📄 본문 입력 완료")
 
 def set_secret_check(drv, enable: bool):
-    if not enable:
-        return
+    if not enable: return
     try:
         el = drv.find_element(By.XPATH, "//*[contains(text(),'비밀글')]/preceding::input[@type='checkbox'][1]")
         if not el.is_selected():
@@ -196,7 +175,7 @@ def submit_post(drv: Chrome):
             return
     except Exception:
         pass
-    log("⚠️ 글쓰기/등록 버튼을 끝내 찾지 못했습니다. 브라우저에서 직접 확인하세요.")
+    log("⚠️ 글쓰기/등록 버튼을 찾지 못했습니다. 브라우저에서 직접 확인하세요.")
 
 # --------------------------
 # 메인
@@ -221,13 +200,13 @@ def main():
             log("👉 자동로그인 실패 → 브라우저에서 직접 로그인하세요 (최대 3분)")
             input("로그인 완료했으면 Enter ▶ ")
             drv.get(args.url)
+            time.sleep(2)
 
         fill_title(drv, post["title"])
         fill_body(drv, post["body"])
         set_secret_check(drv, enable=(args.secret == 1))
 
-        urls = build_unsplash_remote_urls(post["img_query"], args.image_count)
-        log(f"🖼️ 이미지 URL {len(urls)}개 준비됨")
+        log(f"🖼️ 이미지 {args.image_count}장 준비 (생략 처리됨)")
 
         submit_post(drv)
         mark_done(post["row"], post["sheet"], post["wb"])
