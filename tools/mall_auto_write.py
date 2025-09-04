@@ -1,516 +1,413 @@
-# tools/mall_auto_write.py
 # -*- coding: utf-8 -*-
 """
-재다몰 자동 업로드 (견고 버전)
-- .env의 CHROME_USER_DATA_DIR + CHROME_PROFILE로 1차 실행
-  -> "in use" 또는 crash 시 CHROME_FALLBACK_DIR로 폴백
-- 미로그인/권한 알럿 자동 처리
-- 리스트에서 '글쓰기' 버튼 클릭 방식 + write.php 직접 진입 방식 모두 지원
-- docs/data.xlsx에서 A(제목)/B(본문) 읽고 C 상태가 DONE/PUBLISHED/SKIP가 아닌 첫 행을 업로드
+zae-da 게시글 자동 작성 (웹/모바일 겸용)
+- 글쓰기 진입: 리스트 → '글쓰기' 버튼 or 직접 write URL
+- 제목/본문 입력
+- 이미지 업로드: input[type=file] → 에디터 사진아이콘 → HTML <img> Fallback
+- 비밀글: .env의 MALL_SECRET_DEFAULT=1 이면 체크
 """
 
 from __future__ import annotations
-from dotenv import load_dotenv
-import os, sys, time, argparse, datetime
+import os, time, sys, random, tempfile, urllib.request
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
-import openpyxl
+from dataclasses import dataclass
+from typing import Iterable, List, Tuple, Optional
 
-from selenium.webdriver import Chrome, ChromeOptions
+from dotenv import load_dotenv
+from selenium import webdriver
+from selenium.webdriver import Chrome
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.alert import Alert
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import (
-    SessionNotCreatedException,
-    WebDriverException,
-    NoSuchElementException,
-    TimeoutException,
-    UnexpectedAlertPresentException,
-)
-
 from webdriver_manager.chrome import ChromeDriverManager
 
-# ──────────────────────────────
-# 기본 경로/상수
-# ──────────────────────────────
-ROOT = Path(__file__).resolve().parent.parent
-DOCS = ROOT / "docs"
+MAX_WAIT = 10
+ROOT = Path(__file__).resolve().parent
+DOCS = ROOT.parent / "docs"
 XLSX = DOCS / "data.xlsx"
-MAX_WAIT = 20
 
+# -----------------------
+# 유틸
+# -----------------------
+def log(msg: str): print(msg, flush=True)
 
-def log(msg: str):
-    print(msg, flush=True)
-
-
-# ──────────────────────────────
-# 엑셀 헬퍼
-# ──────────────────────────────
-def load_next_row():
-    if not XLSX.exists():
-        raise FileNotFoundError(f"엑셀 파일이 없습니다: {XLSX}")
-    wb = openpyxl.load_workbook(XLSX)
-    ws = wb.active
-    for i in range(2, ws.max_row + 1):
-        title = (ws[f"A{i}"].value or "").strip()
-        body = (ws[f"B{i}"].value or "").strip()
-        status = (ws[f"C{i}"].value or "").strip().upper()
-        if title and body and status not in ("DONE", "PUBLISHED", "SKIP"):
-            return wb, ws, i, title, body
-    return wb, ws, None, None, None
-
-
-def mark_done(wb, ws, row: int):
-    ws[f"C{row}"] = "DONE"
-    ws[f"D{row}"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    wb.save(XLSX)
-
-
-# ──────────────────────────────
-# 공용 Selenium 헬퍼
-# ──────────────────────────────
-def wait_ready(drv, timeout: int = MAX_WAIT):
+def wait_ready(drv: Chrome, timeout: int = MAX_WAIT):
     WebDriverWait(drv, timeout).until(
         lambda d: d.execute_script("return document.readyState") == "complete"
     )
 
-
-def accept_all_alerts(drv, max_loops: int = 5):
-    """열려있는 JS alert/confirm이 있으면 전부 수락."""
-    for _ in range(max_loops):
+def find_any(drv: Chrome, candidates: Iterable[Tuple[str, str]], timeout: int = 5):
+    last_err = None
+    for by, sel in candidates:
         try:
-            a = drv.switch_to.alert
+            el = WebDriverWait(drv, timeout).until(EC.presence_of_element_located((by, sel)))
+            return el, (by, sel)
+        except Exception as e:
+            last_err = e
+    raise last_err or RuntimeError("element not found for any selector")
+
+def click_any(drv: Chrome, candidates: Iterable[Tuple[str, str]], timeout: int = 5) -> bool:
+    try:
+        el, used = find_any(drv, candidates, timeout)
+        drv.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+        el.click()
+        return True
+    except Exception:
+        return False
+
+def send_keys_any(drv: Chrome, text: str, candidates: Iterable[Tuple[str, str]], clear=True, timeout: int = 5) -> bool:
+    try:
+        el, used = find_any(drv, candidates, timeout)
+        drv.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+        if clear:
+            try: el.clear()
+            except Exception: pass
+        el.send_keys(text)
+        return True
+    except Exception:
+        return False
+
+def accept_all_alerts(drv: Chrome, limit=3):
+    for _ in range(limit):
+        try:
+            a = WebDriverWait(drv, 1).until(EC.alert_is_present())
             txt = a.text
-            try:
-                a.accept()
-            except Exception:
-                pass
-            log(f"⚠ 알럿 감지 → 자동 수락: {txt}")
-            time.sleep(0.6)
+            log(f"⚠️ 알럿: {txt}")
+            a.accept()
+            time.sleep(0.2)
         except Exception:
             break
 
+# -----------------------
+# 모드 판별 & 셀렉터
+# -----------------------
+@dataclass
+class ModeSelectors:
+    title: List[Tuple[str, str]]
+    body_textarea: List[Tuple[str, str]]     # 순수 textarea
+    body_iframe: List[Tuple[str, str]]       # 에디터 iframe (본문은 iframe 내부 body에 입력)
+    photo_icon: List[Tuple[str, str]]        # 에디터 사진 아이콘
+    file_input: List[Tuple[str, str]]        # 파일 업로더 직접 접근
+    secret_checkbox: List[Tuple[str, str]]
+    submit_btn: List[Tuple[str, str]]
+    write_button_on_list: List[Tuple[str, str]]
 
-def safe_get(drv, url: str, timeout: int = MAX_WAIT):
-    drv.get(url)
+def detect_mode(drv: Chrome) -> str:
+    url = drv.current_url.lower()
+    if "/m/" in url or url.endswith("/m") or url.split("//")[1].startswith("m."):
+        return "mobile"
+    # 바디에 모바일 힌트가 있으면 mobile
     try:
-        wait_ready(drv, timeout)
-    finally:
-        accept_all_alerts(drv)
-
-
-def find_first(drv, selectors: list[str], by: By = By.CSS_SELECTOR, wait_s: int = 8):
-    """selectors를 순회하며 첫 번째로 존재하는 요소를 반환."""
-    for sel in selectors:
-        try:
-            el = WebDriverWait(drv, wait_s).until(
-                EC.presence_of_element_located((by, sel))
-            )
-            return el, sel
-        except TimeoutException:
-            continue
-    raise NoSuchElementException(f"해당 셀렉터들을 찾을 수 없습니다: {selectors}")
-
-
-# ──────────────────────────────
-# 로그인 감지/시도
-# ──────────────────────────────
-def is_logged_in(drv) -> bool:
-    """상단 네비/페이지 어디서든 '로그아웃' 또는 logout 링크가 보이면 로그인 상태로 간주."""
-    try:
-        # 빠른 텍스트 검사 (헤더/푸터 포함)
-        html = drv.page_source
-        if "로그아웃" in html or "logout" in html.lower():
-            return True
-        # 링크 형태
-        links = drv.find_elements(By.XPATH, "//a[contains(@href,'logout') or contains(.,'로그아웃')]")
-        return len(links) > 0
+        cls = drv.find_element(By.TAG_NAME, "body").get_attribute("class") or ""
+        if "mobile" in cls.lower():
+            return "mobile"
     except Exception:
-        return False
-
-
-def try_auto_login(drv, home_url: str = "https://zae-da.com/") -> bool:
-    """환경변수 MALL_ID/MALL_PW를 사용해 자동 로그인 시도."""
-    uid = os.getenv("MALL_ID", "").strip()
-    pw = os.getenv("MALL_PW", "").strip()
-    if not uid or not pw:
-        return False
-
-    # 홈 → '로그인' 클릭 (없으면 바로 로그인 폼으로 진입)
-    safe_get(drv, home_url)
-    time.sleep(0.8)
-
-    # 로그인 링크 찾아보기
-    try:
-        login_link, _ = find_first(
-            drv,
-            [
-                "//a[contains(.,'로그인')]",
-                "//a[contains(@href,'login') or contains(@href,'member/login')]",
-                "//button[contains(.,'로그인')]",
-            ],
-            by=By.XPATH,
-            wait_s=5,
-        )
-        login_link.click()
-        time.sleep(0.8)
-    except Exception:
-        # 링크 못 찾으면 혹시 이미 로그인 폼일 수 있으니 그대로 진행
         pass
+    return "web"
 
+WEB = ModeSelectors(
+    title=[(By.CSS_SELECTOR, "input[name='title']"), (By.CSS_SELECTOR, "input#title"), (By.CSS_SELECTOR, "input[type='text']")],
+    body_textarea=[(By.CSS_SELECTOR, "textarea[name='contents']"), (By.CSS_SELECTOR, "textarea#contents"), (By.CSS_SELECTOR, "textarea")],
+    body_iframe=[(By.CSS_SELECTOR, "iframe[name='ir1']"), (By.CSS_SELECTOR, "iframe#ir1"), (By.CSS_SELECTOR, "div.editor iframe")],
+    photo_icon=[(By.CSS_SELECTOR, "img[alt='사진']"), (By.CSS_SELECTOR, "button[title*='사진']"), (By.CSS_SELECTOR, "a[title*='사진']")],
+    file_input=[(By.CSS_SELECTOR, "input[type='file'][name^='bf_file']"), (By.CSS_SELECTOR, "input[type='file']")],
+    secret_checkbox=[(By.CSS_SELECTOR, "input[name='is_secret']"), (By.CSS_SELECTOR, "input#is_secret"), (By.XPATH, "//label[contains(.,'비밀글')]/input[@type='checkbox']")],
+    submit_btn=[(By.CSS_SELECTOR, "input[type='submit'][value*='등록']"), (By.CSS_SELECTOR, "button[type='submit']"), (By.XPATH, "//button[contains(.,'글쓰기') or contains(.,'등록')]")],
+    write_button_on_list=[(By.CSS_SELECTOR, "a[href*='write.php?boardid=']"), (By.XPATH, "//a[contains(.,'글쓰기')]")]
+)
+
+MOBILE = ModeSelectors(
+    title=[(By.CSS_SELECTOR, "input[name='title']"), (By.CSS_SELECTOR, "input#title"), (By.CSS_SELECTOR, "input[type='text']")],
+    body_textarea=[(By.CSS_SELECTOR, "textarea[name='memo']"), (By.CSS_SELECTOR, "textarea#memo"), (By.CSS_SELECTOR, "textarea")],
+    body_iframe=[(By.CSS_SELECTOR, "iframe[name='ir1']"), (By.CSS_SELECTOR, "div.editor iframe")],
+    photo_icon=[(By.CSS_SELECTOR, "img[alt='사진']"), (By.CSS_SELECTOR, "button[title*='사진']"), (By.CSS_SELECTOR, "a[title*='사진']")],
+    file_input=[(By.CSS_SELECTOR, "input[type='file'][name^='bf_file']"), (By.CSS_SELECTOR, "input[type='file']")],
+    secret_checkbox=[(By.CSS_SELECTOR, "input[name='is_secret']"), (By.XPATH, "//label[contains(.,'비밀글')]/input[@type='checkbox']")],
+    submit_btn=[(By.XPATH, "//button[contains(.,'글쓰기')]"), (By.CSS_SELECTOR, "input[type='submit']")],
+    write_button_on_list=[(By.CSS_SELECTOR, "a[href*='board_write.php?boardid=']"), (By.XPATH, "//a[contains(.,'글쓰기')]")]
+)
+
+def get_selectors(mode: str) -> ModeSelectors:
+    return MOBILE if mode == "mobile" else WEB
+
+# -----------------------
+# 드라이버 & 로그인
+# -----------------------
+def setup_driver() -> Chrome:
+    load_dotenv()
+    opts = webdriver.ChromeOptions()
+
+    # 사용자 프로필 (있으면 우선 사용)
+    ud = os.getenv("CHROME_USER_DATA_DIR")
+    prof = os.getenv("CHROME_PROFILE")
+    if ud:
+        opts.add_argument(f"--user-data-dir={ud}")
+    if prof:
+        opts.add_argument(f"--profile-directory={prof}")
+
+    # 창 자동 종료 방지/안정화
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--start-maximized")
+
+    try:
+        drv = Chrome(service=Service(ChromeDriverManager().install()), options=opts)
+        return drv
+    except Exception as e:
+        log(f"[chrome] primary profile failed → {e}")
+        # Fallback 프로필
+        fb = os.getenv("CHROME_FALLBACK_DIR", r"C:\ChromeProfiles\zaeda_selenium")
+        Path(fb).mkdir(parents=True, exist_ok=True)
+        opts = webdriver.ChromeOptions()
+        opts.add_argument(f"--user-data-dir={fb}")
+        opts.add_argument("--start-maximized")
+        drv = Chrome(service=Service(ChromeDriverManager().install()), options=opts)
+        log(f"[chrome] fallback profile launched: {fb}\n  ↳ 폴백 창에서 재다몰에 1회 로그인하면 이후 자동 유지됩니다.")
+        return drv
+
+def ensure_login(drv: Chrome, any_url_in_site: str):
+    """로그인 상태가 아니면 로그인 페이지로 유도하고 수동로그인 자동 감지"""
     wait_ready(drv)
+    # 로그인 필요 신호: '로그인' 링크, 'member/login' 등
+    html = drv.page_source.lower()
+    need = ("login.php" in drv.current_url.lower()) or ("로그인" in html and "로그아웃" not in html)
 
-    # 아이디/비번 입력 필드 탐색
-    id_sels = [
-        "input[name='mb_id']",
-        "input#mb_id",
-        "input[name='login_id']",
-        "input#login_id",
-        "input[name='user_id']",
-        "input[name='id']",
-    ]
-    pw_sels = [
-        "input[name='mb_password']",
-        "input#mb_password",
-        "input[name='login_pw']",
-        "input#login_pw",
-        "input[name='user_pw']",
-        "input[name='password']",
-        "input[name='passwd']",
-    ]
-    btn_sels = [
-        "//button[contains(.,'로그인')]",
-        "//input[@type='submit' and (contains(@value,'로그인') or contains(@value,'login'))]",
-        "//a[contains(@onclick,'login') and contains(.,'로그인')]",
-    ]
-
-    try:
-        id_el, _ = find_first(drv, id_sels, By.CSS_SELECTOR, wait_s=6)
-        pw_el, _ = find_first(drv, pw_sels, By.CSS_SELECTOR, wait_s=6)
-        id_el.clear(); id_el.send_keys(uid)
-        pw_el.clear(); pw_el.send_keys(pw)
-
-        try:
-            btn, _ = find_first(drv, btn_sels, By.XPATH, wait_s=4)
-            btn.click()
-        except Exception:
-            # 엔터로 제출
-            pw_el.submit()
-
-        # 로그인 결과 대기 (최대 20초)
-        for _ in range(20):
-            time.sleep(1.0)
-            accept_all_alerts(drv)
-            if is_logged_in(drv):
-                log("🔐 자동 로그인 성공")
-                return True
-        return False
-    except Exception:
-        return False
-
-
-def wait_until_logged_in(drv, timeout_s: int = 180) -> bool:
-    """수동 로그인(다른 창/현재 창) 완료를 텍스트로 감지. 키보드 입력 없이 폴링."""
-    log("⏳ 로그인 감지 대기 중... (최대 3분)")
-    t0 = time.time()
-    while time.time() - t0 < timeout_s:
-        time.sleep(2.0)
-        accept_all_alerts(drv)
-        try:
-            if is_logged_in(drv):
-                log("🔓 로그인 감지됨")
-                return True
-        except Exception:
-            pass
-    return False
-
-
-def ensure_login(drv, list_url: str, write_url: str):
-    """로그인 필요 시 자동 로그인 시도 → 실패하면 수동 로그인 감지."""
-    # 1) 현재 로그인 상태면 바로 리턴
-    try:
-        accept_all_alerts(drv)
-        if is_logged_in(drv):
-            return
-    except Exception:
-        pass
-
-    # 2) 자동 로그인 시도
-    if try_auto_login(drv):
+    if need:
+        log("👉 로그인 페이지로 이동해 수동 로그인 해주세요. (최대 3분 내 자동 감지)")
+        start = time.time()
+        while time.time() - start < 180:
+            time.sleep(1.5)
+            try:
+                if "로그아웃" in drv.page_source:
+                    log("🔓 로그인 감지됨")
+                    return
+            except Exception:
+                pass
+        raise RuntimeError("로그인 감지 실패")
+    else:
         return
 
-    # 3) 자동 실패 시: 리스트 페이지 오픈 후 '로그인' 유도, 수동 로그인 감지
-    safe_get(drv, list_url or "https://zae-da.com/")
-    log("👉 로그인 페이지로 이동해 수동 로그인 해주세요. (최대 3분 내 자동 감지)")
-    if not wait_until_logged_in(drv, timeout_s=180):
-        raise RuntimeError("로그인을 감지하지 못했습니다. 로그인 후 다시 실행해주세요.")
+# -----------------------
+# 네비게이션/진입
+# -----------------------
+def ensure_write_page(drv: Chrome, list_url: Optional[str], write_url: Optional[str]):
+    """리스트→글쓰기 or write_url 직접. 두 모드 모두 대응."""
+    # 1) 우선 주어진 URL로 이동
+    target = write_url or list_url
+    if not target:
+        raise RuntimeError("write_url 또는 list_url 중 하나는 필요합니다.")
 
+    drv.get(target)
+    wait_ready(drv)
+    accept_all_alerts(drv)
 
-# ──────────────────────────────
-# 글쓰기 페이지 진입
-# ──────────────────────────────
-def board_id_from_url(url: str) -> str | None:
-    try:
-        q = parse_qs(urlparse(url).query)
-        bid = q.get("boardid", [None])[0]
-        return bid
-    except Exception:
-        return None
+    mode = detect_mode(drv)
+    sel = get_selectors(mode)
 
+    # 이미 write 폼이면 통과 (제목/본문 존재 확인)
+    if send_keys_any(drv, "", sel.title, clear=False) or send_keys_any(drv, "", sel.body_textarea, clear=False):
+        log(f"✅ 글쓰기 페이지({mode}) 진입 확인")
+        return
 
-def goto_write_from_list(drv, list_url: str, boardid: str | None) -> bool:
-    safe_get(drv, list_url)
-    # 리스트에서 '글쓰기' 버튼 또는 write.php 링크 찾기
-    candidates = [
-        # 직접 링크
-        f"//a[contains(@href,'board_write.php') and contains(@href,'boardid={boardid}')]" if boardid else "",
-        # 텍스트/아이콘 버튼
-        "//a[contains(.,'글쓰기') or contains(.,'작성')]",
-        "//button[contains(.,'글쓰기') or contains(.,'작성')]",
-        "//a[@class='btn' and (contains(.,'글쓰기') or contains(.,'작성'))]",
-        "//a[contains(@class,'write')]",
-    ]
-    candidates = [c for c in candidates if c]
-
-    for xpath in candidates:
-        try:
-            btn = WebDriverWait(drv, 8).until(EC.element_to_be_clickable((By.XPATH, xpath)))
-            btn.click()
-            time.sleep(0.8)
+    # 리스트라면 글쓰기 버튼 클릭
+    if list_url:
+        drv.get(list_url)
+        wait_ready(drv)
+        if click_any(drv, sel.write_button_on_list):
+            time.sleep(0.5)
             wait_ready(drv)
             accept_all_alerts(drv)
-            # write 페이지 판단: URL 또는 제목 필드 존재
-            if "board_write.php" in drv.current_url:
-                return True
-            # 필드 존재 확인
-            _ = find_first(drv, ["input[name='wr_subject']", "input[name='subject']", "input[name='title']"], By.CSS_SELECTOR, 3)
-            return True
-        except UnexpectedAlertPresentException:
-            accept_all_alerts(drv)
-            # 권한 알럿이면 로그인 시도 후 재시도
-            ensure_login(drv, list_url, "")
-            return goto_write_from_list(drv, list_url, boardid)
+            mode = detect_mode(drv)
+            sel = get_selectors(mode)
+            if send_keys_any(drv, "", sel.title, clear=False) or send_keys_any(drv, "", sel.body_textarea, clear=False):
+                log(f"✅ 글쓰기 페이지(리스트→버튼, {mode}) 진입 성공")
+                return
+
+    # write_url을 데스크톱/모바일 모두 시도
+    base = target
+    if "/m/" in base:
+        alt = base.replace("/m/", "/bbs/")
+    else:
+        alt = base.replace("/bbs/", "/m/bbs/")
+    for u in [target, alt]:
+        drv.get(u)
+        wait_ready(drv)
+        if send_keys_any(drv, "", sel.title, clear=False) or send_keys_any(drv, "", sel.body_textarea, clear=False):
+            log(f"✅ 글쓰기 페이지(대안 URL, {detect_mode(drv)}) 진입 성공")
+            return
+
+    raise RuntimeError("글쓰기 페이지로 진입하지 못했습니다.")
+
+# -----------------------
+# 본문/이미지
+# -----------------------
+UNSPLASH_TOPICS = [
+    "health lifestyle", "healthy food korean", "fitness walking", "office commute",
+    "sleep wellness", "korean meal table", "city morning jog"
+]
+
+def download_unsplash_samples(n=2) -> List[str]:
+    """간단한 샘플 이미지 다운로드 (저작권 고지 필요 시 본문에 출처 문구 삽입 권장)"""
+    saved = []
+    tmpdir = Path(tempfile.mkdtemp(prefix="zaeda_"))
+    for i in range(n):
+        kw = random.choice(UNSPLASH_TOPICS)
+        # 1024x768 랜덤 이미지
+        url = f"https://source.unsplash.com/1024x768/?{urllib.parse.quote(kw)}"
+        dst = tmpdir / f"unsplash_{i+1}.jpg"
+        try:
+            urllib.request.urlretrieve(url, dst)
+            saved.append(str(dst))
         except Exception:
-            continue
+            pass
+    return saved
+
+def set_body(drv: Chrome, sel: ModeSelectors, text: str) -> bool:
+    """textarea → iframe 순으로 시도"""
+    # 1) textarea
+    if send_keys_any(drv, text, sel.body_textarea, clear=True):
+        log("본문 입력 완료 ✓ (textarea)")
+        return True
+    # 2) iframe editor
+    try:
+        iframe, _ = find_any(drv, sel.body_iframe, timeout=2)
+        drv.switch_to.frame(iframe)
+        body = WebDriverWait(drv, 3).until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+        drv.execute_script("arguments[0].innerHTML = '';", body)
+        body.send_keys(text)
+        drv.switch_to.default_content()
+        log("본문 입력 완료 ✓ (iframe editor)")
+        return True
+    except Exception:
+        pass
     return False
 
-
-def ensure_write_page(drv, list_url: str, write_url: str):
-    """리스트→버튼 클릭 우선, 실패 시 write.php 직접 진입."""
-    bid = board_id_from_url(write_url)
-    # A) 이미 write 페이지면 통과
+def try_upload_files(drv: Chrome, sel: ModeSelectors, files: List[str]) -> bool:
+    """input[type=file] → 에디터 사진아이콘 순으로 업로드 시도"""
+    # 1) 파일 입력 직접
     try:
-        if "board_write.php" in drv.current_url:
-            return
+        file_el, used = find_any(drv, sel.file_input, timeout=2)
+        for p in files[:10]:
+            file_el.send_keys(p)
+            time.sleep(0.3)
+        log(f"이미지 업로드 완료 ✓ (file input, {len(files[:10])}장)")
+        return True
     except Exception:
         pass
 
-    # B) 리스트에서 글쓰기 버튼 클릭 시도
-    if list_url and goto_write_from_list(drv, list_url, bid):
-        log("✅ 글쓰기 페이지(리스트→버튼) 진입 성공")
-        return
-
-    # C) write.php 직접 오픈 (미로그인/권한 알럿이면 처리 후 재시도)
-    safe_get(drv, write_url)
-    if "board_write.php" not in drv.current_url:
-        # 권한 문제 등으로 리다이렉트 되었을 수 있음 → 로그인 보장 후 재시도
-        ensure_login(drv, list_url or "https://zae-da.com/bbs/list.php?boardid=" + (bid or ""), write_url)
-        safe_get(drv, write_url)
-
-    if "board_write.php" not in drv.current_url:
-        raise RuntimeError("글쓰기 페이지로 진입하지 못했습니다.")
-
-
-# ──────────────────────────────
-# 입력/제출
-# ──────────────────────────────
-def fill_title(drv, title: str):
-    inputs = [
-        "input[name='wr_subject']",
-        "input[name='subject']",
-        "input[name='title']",
-        "input[type='text']#wr_subject",
-    ]
-    ti, sel = find_first(drv, inputs, By.CSS_SELECTOR, wait_s=10)
-    ti.clear()
-    ti.send_keys(title)
-    log("제목 입력 완료 ✓")
-
-
-def fill_body(drv, body: str):
-    """textarea → contenteditable → iframe 순으로 시도."""
-    # 1) textarea
-    try:
-        ta, _ = find_first(
-            drv,
-            ["textarea[name='wr_content']", "textarea[name='content']", "textarea#wr_content", "textarea"],
-            By.CSS_SELECTOR,
-            wait_s=4,
-        )
-        ta.clear()
-        ta.send_keys(body)
-        log("본문 입력 완료 ✓ (textarea)")
-        return
-    except Exception:
-        pass
-
-    # 2) contenteditable
-    try:
-        ed, _ = find_first(drv, ["div[contenteditable='true']"], By.CSS_SELECTOR, wait_s=3)
-        drv.execute_script("arguments[0].innerHTML = arguments[1];", ed, body.replace("\n", "<br>"))
-        log("본문 입력 완료 ✓ (contenteditable)")
-        return
-    except Exception:
-        pass
-
-    # 3) iframe 에디터들 순회
-    iframes = drv.find_elements(By.TAG_NAME, "iframe")
-    for idx, ifr in enumerate(iframes):
+    # 2) 사진 아이콘 클릭 → 파일 입력 노출
+    if click_any(drv, sel.photo_icon, timeout=1):
+        time.sleep(0.4)
         try:
-            drv.switch_to.frame(ifr)
-            # 에디터 내부 body/iframe 편집 영역 탐색
-            try:
-                editable = drv.find_elements(By.CSS_SELECTOR, "[contenteditable='true'], body")
-                if editable:
-                    el = editable[0]
-                    # body의 경우 .innerHTML 세팅
-                    drv.execute_script("arguments[0].innerHTML = arguments[1];", el, body.replace("\n", "<br>"))
-                    log(f"본문 입력 완료 ✓ (iframe #{idx})")
-                    drv.switch_to.default_content()
-                    return
-            finally:
-                drv.switch_to.default_content()
+            file_el, _ = find_any(drv, [(By.CSS_SELECTOR, "input[type='file']")], timeout=3)
+            for p in files[:10]:
+                file_el.send_keys(p)
+                time.sleep(0.4)
+            log(f"이미지 업로드 완료 ✓ (photo icon, {len(files[:10])}장)")
+            return True
         except Exception:
-            drv.switch_to.default_content()
-            continue
+            pass
 
-    raise NoSuchElementException("본문 입력 영역을 찾지 못했습니다. (textarea/contenteditable/iframe 불가)")
+    return False
 
-
-def submit_post(drv):
-    # 등록/작성/저장 버튼
-    sels = [
-        "//button[contains(.,'등록') or contains(.,'작성') or contains(.,'저장')]",
-        "//input[@type='submit']",
-        "//a[contains(@onclick,'write') and (contains(.,'등록') or contains(.,'작성'))]",
-    ]
-    for xp in sels:
-        try:
-            btn = WebDriverWait(drv, 6).until(EC.element_to_be_clickable((By.XPATH, xp)))
-            btn.click()
-            time.sleep(0.8)
-            accept_all_alerts(drv)
-            log("등록 버튼 클릭 ✓")
-            return
-        except Exception:
-            continue
-    raise NoSuchElementException("등록/작성 버튼을 찾지 못했습니다.")
-
-
-# ──────────────────────────────
-# 크롬 드라이버
-# ──────────────────────────────
-def setup_driver() -> Chrome:
-    load_dotenv()  # .env 읽기
-
-    user_data_dir = os.getenv("CHROME_USER_DATA_DIR", "").strip()
-    profile_dir   = os.getenv("CHROME_PROFILE", "").strip()
-    fallback_dir  = os.getenv("CHROME_FALLBACK_DIR", "").strip()
-
-    def _make_options(ud: str | None, prof: str | None) -> ChromeOptions:
-        opts = ChromeOptions()
-        if ud:
-            opts.add_argument(f"--user-data-dir={ud}")
-        if prof:
-            # Windows의 멀티 프로필: "User Data" + "Profile xx"
-            opts.add_argument(f"--profile-directory={prof}")
-
-        # 안정화 옵션 (Windows)
-        opts.add_argument("--start-maximized")
-        opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-        opts.add_experimental_option("useAutomationExtension", False)
-        # 암시적 크래시 방지용(불필요한 경우도 있으나 무해)
-        opts.add_argument("--disable-notifications")
-        opts.add_argument("--disable-popup-blocking")
-
-        return opts
-
-    def _launch(opts: ChromeOptions) -> Chrome:
-        return Chrome(service=Service(ChromeDriverManager().install()), options=opts)
-
-    # 1차: 환경변수의 실제 프로필로 시도
+def fallback_insert_img_html(drv: Chrome, sel: ModeSelectors, urls: List[str]) -> bool:
+    """업로드가 모두 실패하면 본문에 <img> HTML로 삽입"""
+    html = "".join([f'<p><img src="{u}" alt="image" style="max-width:100%;height:auto"/></p>' for u in urls])
+    # textarea 우선
+    if send_keys_any(drv, html, sel.body_textarea, clear=False):
+        return True
+    # iframe
     try:
-        if user_data_dir:
-            log("기존 브라우저 세션에서 여는 중입니다.")
-        drv = _launch(_make_options(user_data_dir or None, profile_dir or None))
-        return drv
-    except (SessionNotCreatedException, WebDriverException) as e:
-        msg = f"{e}"
-        log(f"[chrome] primary profile failed → {msg}")
+        iframe, _ = find_any(drv, sel.body_iframe, timeout=2)
+        drv.switch_to.frame(iframe)
+        body = WebDriverWait(drv, 3).until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+        drv.execute_script("arguments[0].insertAdjacentHTML('beforeend', arguments[1]);", body, html)
+        drv.switch_to.default_content()
+        return True
+    except Exception:
+        pass
+    return False
 
-    # 2차: 폴백 프로필로 시도
-    if not fallback_dir:
-        # 폴백 경로 기본값
-        fallback_dir = r"C:\ChromeProfiles\zaeda_selenium"
-    Path(fallback_dir).mkdir(parents=True, exist_ok=True)
-    drv = _launch(_make_options(fallback_dir, None))
-    log(f"[chrome] fallback profile launched: {fallback_dir}\n  ↳ 폴백 창에서 재다몰에 1회 로그인해 두면 이후 자동 유지됩니다.")
-    return drv
+# -----------------------
+# 제출
+# -----------------------
+def set_secret_if_needed(drv: Chrome, sel: ModeSelectors):
+    if os.getenv("MALL_SECRET_DEFAULT", "1") == "1":
+        click_any(drv, sel.secret_checkbox, timeout=1)
 
+def submit_post(drv: Chrome, sel: ModeSelectors):
+    if click_any(drv, sel.submit_btn, timeout=2):
+        time.sleep(0.8)
+        accept_all_alerts(drv)
+        log("📤 제출 시도")
+        return
+    raise Exception("등록/글쓰기 버튼 클릭 실패")
 
-# ──────────────────────────────
+# -----------------------
 # 메인
-# ──────────────────────────────
+# -----------------------
 def main():
     load_dotenv()
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--url", required=True, help="글쓰기 폼 URL 예) https://zae-da.com/m/bbs/board_write.php?boardid=41")
-    ap.add_argument("--list-url", default=None, help="게시판 리스트 URL 예) https://zae-da.com/bbs/list.php?boardid=41")
-    args = ap.parse_args()
 
-    # 엑셀에서 1건 꺼내오기
-    wb, ws, row, title, body = load_next_row()
-    if not row:
-        log("대기 중인 업로드 건이 없습니다.")
-        return
+    # 입력값 준비
+    write_url = os.getenv("WRITE_URL", "https://zae-da.com/bbs/write.php?boardid=41")
+    list_url = os.getenv("LIST_URL",  "https://zae-da.com/bbs/list.php?boardid=41")
+    mobile_write = write_url.replace("/bbs/", "/m/bbs/")
+    mobile_list  = list_url.replace("/bbs/", "/m/bbs/")
 
-    # 크롬 구동
+    # 제목/본문 샘플 (run_post.py가 넘겨줄 수도 있음)
+    title = os.getenv("POST_TITLE", "[만성질환 관리/당뇨 관리] 테스트 제목")
+    body  = os.getenv("POST_BODY",  "테스트 본문 입니다.\n자동화 확인용.")
+
     drv = setup_driver()
     try:
-        # 권한 알럿/미로그인 대비: 글쓰기 전 로그인 보장
-        list_url = args.list_url or "https://zae-da.com"  # 최소 홈이라도 전달
-        ensure_login(drv, list_url, args.url)
+        # 진입(모드 불문)
+        try:
+            ensure_write_page(drv, list_url, write_url)
+        except Exception:
+            ensure_write_page(drv, mobile_list, mobile_write)
 
-        # 글쓰기 페이지 진입 (리스트→버튼 우선, 실패 시 직접 진입)
-        ensure_write_page(drv, args.list_url, args.url)
+        ensure_login(drv, write_url)
+        wait_ready(drv)
+        accept_all_alerts(drv)
 
-        # 제목/본문 입력
-        fill_title(drv, title)
-        fill_body(drv, body)
+        mode = detect_mode(drv)
+        sel = get_selectors(mode)
+
+        # 제목/본문
+        if not send_keys_any(drv, title, sel.title):
+            raise RuntimeError("제목 입력 실패")
+        if not set_body(drv, sel, body):
+            raise RuntimeError("본문 입력 실패")
+
+        # 이미지: 다운로드 → 업로드 → 실패시 HTML src 삽입
+        files = download_unsplash_samples(n=3)
+        if files:
+            ok = try_upload_files(drv, sel, files)
+            if not ok:
+                # HTML로 직접 삽입 (다운로드했던 파일은 사용할 수 없으니 Unsplash URL로 다시)
+                urls = [f"https://source.unsplash.com/1024x768/?health,{i}" for i in range(3)]
+                if fallback_insert_img_html(drv, sel, urls):
+                    log("이미지 삽입 완료 ✓ (HTML fallback)")
+        else:
+            # 바로 HTML로
+            urls = [f"https://source.unsplash.com/1024x768/?health,{i}" for i in range(3)]
+            if fallback_insert_img_html(drv, sel, urls):
+                log("이미지 삽입 완료 ✓ (HTML fallback, no download)")
+
+        # 비밀글(테스트 기본 on)
+        set_secret_if_needed(drv, sel)
 
         # 제출
-        submit_post(drv)
-
-        # 완료 처리
-        mark_done(wb, ws, row)
-        log("✅ 업로드 완료 → DONE 처리")
-    except UnexpectedAlertPresentException:
-        # 권한/세션 알럿 등: 가능한 한 수락하고 종료
-        try:
-            accept_all_alerts(drv)
-        except Exception:
-            pass
-        log("❌ 알럿으로 인해 제출이 중단되었습니다.")
-        raise
+        submit_post(drv, sel)
+        log("✅ 종료")
     finally:
-        try:
-            # 닫지 않고 남겨두고 싶으면 주석 처리
-            drv.quit()
-        except Exception:
-            pass
-
+        # 필요시 닫지 말고 유지하려면 주석
+        # drv.quit()
+        pass
 
 if __name__ == "__main__":
     main()
