@@ -3,22 +3,27 @@
 """
 원클릭 재다몰 업로드 실행기
 - docs/data.xlsx 없으면 자동 생성 + 본문 채우기
-- auto_write.py 호출 (기본: 시크릿 모드)
+- auto_write.py 호출 (시크릿 모드 + .env 기반 로그인)
 
-환경변수(선택):
-  ZAEDA_WRITE_URL   : 글쓰기 URL (기본값 아래)
+환경변수:
+  ZAEDA_ID        : 로그인 ID
+  ZAEDA_PW        : 로그인 비밀번호
+  ZAEDA_WRITE_URL : 글쓰기 URL (기본값 아래)
 """
 
 from __future__ import annotations
 import os, subprocess, sys
 from pathlib import Path
+from dotenv import load_dotenv
+
+# ── .env 파일 로드 ─────────────────────────────
+load_dotenv()
 
 ROOT  = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
 DOCS  = ROOT / "docs"
 XLSX  = DOCS / "data.xlsx"
 
-# ✅ 실제 글쓰기 URL
 DEFAULT_URL = "https://zae-da.com/bbs/write.php?boardid=41"
 
 def run(cmd: list[str], check=True):
@@ -39,13 +44,13 @@ def main():
     # 2) 본문 비어있는 행 채우기
     run([sys.executable, str(TOOLS/"create_contents.py"), "--only-empty"])
 
-    # 3) 실제 업로드 실행 (auto_write.py 호출)
+    # 3) 실제 업로드 실행 (auto_write.py 호출, 시크릿 모드)
     run([
         sys.executable,
         str(TOOLS/"auto_write.py"),
         "--url", write_url,
-        "--secret", "1",           # 기본: 비밀글 ON
-        "--image-count", "2"       # 기본: 이미지 2장
+        "--secret", "1",        # 기본: 비밀글 ON
+        "--image-count", "2"    # 기본: 이미지 2장
     ])
 
     print("✅ 종료")
