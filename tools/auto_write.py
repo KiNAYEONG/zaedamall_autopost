@@ -6,16 +6,16 @@ r"""
 ✅ 현재 게시판(boardid=41) 기준 확인된 구조
 - oEditors.getById['memo'] 존재
 - textarea id/name = memo
-- se2_iframe 이라는 id의 iframe은 없음(iframe id/name 비어있을 수 있음)
+- iframe id/name 비어있을 수 있음(= se2_iframe 같은 고정 id 없음)
 
 동작 요약
 1) 시크릿 크롬 실행
 2) 로그인 페이지로 이동 → #login_id/#login_pw 자동 입력 → 엔터 submit
 3) 글쓰기 페이지 진입 (write.php?boardid=41)
 4) 제목 입력
-5) 본문 입력
-   - 1순위: textarea#memo value 세팅(가장 튼튼)
-   - 2순위: oEditors.getById['memo'] 있으면 SET_CONTENTS + UPDATE_CONTENTS_FIELD
+5) 본문 입력 (HTML)
+   - 1순위: oEditors.getById['memo'] → SET_CONTENTS + UPDATE_CONTENTS_FIELD
+   - 2순위: textarea#memo value 세팅(제출값 직접)
 6) 등록 버튼 클릭(JS click)
 7) 브라우저는 기본적으로 열어둠(옵션 --close로 닫기)
 
@@ -270,12 +270,99 @@ def ensure_write_page(drv, list_url: str, write_url: str) -> None:
 
 
 # ──────────────────────────────
+# Content builder (HTML) - 줄간격/굵기/이미지
+# ──────────────────────────────
+def build_test_post():
+    """
+    ✅ 줄간격(line-height) 고정 + 제목/소제목 굵게 + 이미지 2장 포함(테스트용)
+    - 이모지는 환경에 따라 ????로 깨질 수 있어서, 테스트는 기호(★/✓/>) 위주로 사용
+    """
+    title = "다이어트/비만 관리 | 운동해도 변화 없을 때, 먼저 점검할 3가지"
+
+    img1 = "https://images.unsplash.com/photo-1554284126-aa88f22d8b74?auto=format&fit=crop&w=1200&q=80"
+    img2 = "https://images.unsplash.com/photo-1543362906-acfc16c67564?auto=format&fit=crop&w=1200&q=80"
+
+    # 핵심: wrapper에 font-size/line-height 지정 (행간 줄이기)
+    body_html = f"""
+<div style="font-size:15px; line-height:1.45; color:#111;">
+  <p style="margin:0 0 10px 0;">
+    분명 예전과 비슷하게 먹고, 운동도 꾸준히 하는데 체중이 잘 안 내려갈 때가 있죠.<br/>
+    그럴 땐 “의지가 부족해서”라기보다, 몸이 현재 어떤 신호를 보내고 있는지 먼저 확인해보는 게 도움이 됩니다.<br/>
+    오늘은 생활 속에서 바로 점검할 수 있는 3가지를 정리해볼게요.
+  </p>
+
+  <p style="margin:12px 0 8px 0;">
+    <img src="{img1}" alt="운동 이미지" style="max-width:100%; border-radius:10px;" />
+  </p>
+
+  <p style="margin:14px 0 6px 0;">
+    <strong style="font-size:17px;">1) 수면 리듬부터 정리하기 ★</strong>
+  </p>
+  <p style="margin:0 0 10px 0;">
+    잠이 부족하거나 취침 시간이 들쑥날쑥하면 식욕·포만감에 관여하는 균형이 흔들릴 수 있어요.<br/>
+    특히 늦은 밤에 단 음식이 당기거나, 아침에 몸이 무겁게 느껴진다면 수면부터 조정해보는 게 좋습니다.<br/>
+    오늘부터는 <strong>기상 시간</strong>을 고정하고, 취침 1시간 전에는 화면 밝기(휴대폰/노트북)를 낮춰보세요.<br/>
+    <strong>초보자 팁:</strong> 갑자기 2시간 당기기보다 15~30분씩 앞당기면 훨씬 덜 힘들어요.
+  </p>
+
+  <p style="margin:14px 0 6px 0;">
+    <strong style="font-size:17px;">2) ‘가공당 + 음료’부터 줄이기 ✓</strong>
+  </p>
+  <p style="margin:0 0 10px 0;">
+    같은 칼로리라도 액상 형태(달달한 커피, 주스, 탄산)는 포만감이 낮아서 과식으로 이어지기 쉬워요.<br/>
+    또 자주 마시면 몸 컨디션이 들쑥날쑥해질 수 있습니다.<br/>
+    <strong>실행법:</strong> 일주일만 음료를 물/무가당 차로 바꿔보고, 디저트는 주 2회로 요일을 정해보세요.<br/>
+    <strong>초보자 팁:</strong> 완전 금지 대신 ‘요일 제한’이 오래 갑니다.
+  </p>
+
+  <p style="margin:12px 0 8px 0;">
+    <img src="{img2}" alt="식단 이미지" style="max-width:100%; border-radius:10px;" />
+  </p>
+
+  <p style="margin:14px 0 6px 0;">
+    <strong style="font-size:17px;">3) 단백질·식이섬유를 ‘끼니마다’ 넣기 &gt;</strong>
+  </p>
+  <p style="margin:0 0 10px 0;">
+    식사에서 단백질과 식이섬유가 부족하면 금방 배가 고파지고, 간식으로 이어지기 쉬워요.<br/>
+    특히 아침을 빵/커피로 끝내는 날이 많다면 점심 전에 허기가 크게 올 수 있습니다.<br/>
+    <strong>실행법:</strong> 끼니마다 단백질(달걀, 두부, 생선, 살코기)과 채소(나물/샐러드/김치)를 한 가지씩만 추가해보세요.<br/>
+    <strong>초보자 팁:</strong> ‘계란 1개 + 채소 반찬 1개’만 고정해도 충분해요.
+  </p>
+
+  <p style="margin:14px 0 6px 0;"><strong style="font-size:16px;">주의사항</strong></p>
+  <p style="margin:0 0 10px 0;">
+    기저질환(당뇨, 갑상선 질환 등)이 있거나 약물을 복용 중이라면 체중 변화가 다르게 나타날 수 있어요.<br/>
+    또 너무 적게 먹고 많이 운동하면 오히려 피로가 쌓여 지속이 어려울 수 있으니 ‘지속 가능한 범위’로 조절해보세요.
+  </p>
+
+  <p style="margin:14px 0 6px 0;"><strong style="font-size:16px;">요약</strong></p>
+  <p style="margin:0 0 10px 0;">
+    운동만 늘리기 전에 수면 리듬·음료/가공당·끼니 구성(단백질/식이섬유) 3가지를 먼저 점검해보면 좋습니다.<br/>
+    작은 습관 하나가 식욕과 컨디션을 바꾸고, 장기적으로 체중 관리에도 도움이 될 수 있어요.
+  </p>
+
+  <p style="margin:14px 0 6px 0;"><strong style="font-size:16px;">근거자료(참고)</strong></p>
+  <p style="margin:0;">
+    - WHO: 식생활 및 만성질환 관련 자료<br/>
+    - 질병관리청: 비만/대사건강 관련 건강정보<br/>
+    - 대한비만학회: 비만 진료지침(생활습관 관리)
+  </p>
+
+  <hr style="border:none;border-top:1px solid #ddd; margin:14px 0;" />
+
+  <p style="margin:0; color:#444;">
+    이 글은 일반적인 건강 정보를 제공하기 위한 것이며, 의료적 진단이나 치료를 대신하지 않습니다. 개인별 상태에 따라 전문가 상담이 필요할 수 있습니다.
+  </p>
+</div>
+""".strip()
+
+    return title, body_html
+
+
+# ──────────────────────────────
 # SmartEditor2(memo) body set
 # ──────────────────────────────
 def wait_editor_ready(drv):
-    """
-    memo textarea 또는 oEditors.getById['memo']가 준비될 때까지 대기
-    """
     WebDriverWait(drv, 20).until(
         lambda d: d.find_elements(By.CSS_SELECTOR, "textarea#memo, textarea[name='memo']")
         or d.execute_script(
@@ -284,19 +371,7 @@ def wait_editor_ready(drv):
     )
 
 
-def set_body_textarea_memo(drv, body: str) -> bool:
-    tas = drv.find_elements(By.CSS_SELECTOR, "textarea#memo, textarea[name='memo']")
-    if not tas:
-        return False
-    drv.execute_script("arguments[0].value = arguments[1];", tas[0], body)
-    return True
-
-
-def set_body_oeditors_memo(drv, body: str) -> str:
-    """
-    oEditors API로 memo에 SET_CONTENTS / UPDATE_CONTENTS_FIELD
-    """
-    html = body.replace("\n", "<br>")
+def set_body_oeditors_memo(drv, body_html: str) -> str:
     return drv.execute_script(
         """
         const html = arguments[0];
@@ -311,14 +386,19 @@ def set_body_oeditors_memo(drv, body: str) -> str:
             return 'ERR:' + e.toString();
         }
         """,
-        html,
+        body_html,
     )
 
 
+def set_body_textarea_memo(drv, body_html: str) -> bool:
+    tas = drv.find_elements(By.CSS_SELECTOR, "textarea#memo, textarea[name='memo']")
+    if not tas:
+        return False
+    drv.execute_script("arguments[0].value = arguments[1];", tas[0], body_html)
+    return True
+
+
 def sync_editor_before_submit(drv):
-    """
-    등록 직전 한번 더 textarea 동기화(있으면 성공률↑)
-    """
     try:
         drv.execute_script(
             """
@@ -333,40 +413,28 @@ def sync_editor_before_submit(drv):
         pass
 
 
-def set_post_body(drv, body: str):
-    """
-    본문 입력 통합(가장 안정적인 순서):
-    1) textarea#memo value 세팅(제출값 직접)
-    2) oEditors가 있으면 UI/textarea 동기화까지 수행
-    """
+def set_post_body(drv, body_html: str):
     log("본문 입력 시작… (memo)")
-
     wait_editor_ready(drv)
 
-    # 1) textarea 먼저 세팅 (가장 확실)
-    if set_body_textarea_memo(drv, body):
-        log("본문 입력 완료 ✓ (textarea#memo)")
-    else:
-        log("⚠ textarea#memo 미탐지")
-
-    # 2) oEditors 있으면 한번 더 세팅/동기화 (선택 but 유용)
+    # 1) oEditors 먼저(화면/textarea 동기화까지 되는 편)
+    res = "NO_EDITORS"
     try:
-        res = set_body_oeditors_memo(drv, body)
+        res = set_body_oeditors_memo(drv, body_html)
         log(f"oEditors 결과: {res}")
-        if isinstance(res, str) and res.startswith("OK:"):
-            log("본문 동기화 완료 ✓ (oEditors:memo)")
     except Exception as e:
-        log(f"⚠ oEditors 예외(무시하고 진행): {repr(e)}")
+        log(f"⚠ oEditors 예외(무시): {repr(e)}")
 
-    # 최종 검증: textarea 값이 들어갔는지 확인(짧게)
-    try:
-        v = drv.execute_script(
-            "const t=document.querySelector('textarea#memo,textarea[name=memo]'); return t ? (t.value || '') : null;"
-        )
-        if v is None or len(v.strip()) == 0:
-            raise RuntimeError("textarea#memo 값이 비어있습니다.")
-    except Exception as e:
-        raise RuntimeError(f"본문 입력 검증 실패: {repr(e)}")
+    # 2) textarea도 한 번 더(제출값 보장)
+    if set_body_textarea_memo(drv, body_html):
+        log("본문 입력 완료 ✓ (textarea#memo)")
+
+    # 최종 검증
+    v = drv.execute_script(
+        "const t=document.querySelector('textarea#memo,textarea[name=memo]'); return t ? (t.value || '') : null;"
+    )
+    if v is None or len(v.strip()) == 0:
+        raise RuntimeError("본문 입력 검증 실패: textarea#memo 값이 비어있습니다.")
 
 
 # ──────────────────────────────
@@ -389,22 +457,22 @@ def main():
         ensure_login(drv, args.list_url)
         ensure_write_page(drv, args.list_url, args.url)
 
-        # 콘텐츠 준비
+        # ✅ 기본값 먼저 세팅(= UnboundLocalError 방지)
         wb = ws = row = None
-        if args.no_excel:
-            title = "테스트 제목입니다 (자동화)"
-            body = "테스트 본문 입니다.\n자동화 확인용."
-        else:
-            # 엑셀 없으면 자동으로 테스트 모드로 전환
+        title, body_html = build_test_post()
+
+        # 엑셀 모드 (단, 파일 없으면 자동으로 테스트로 진행)
+        if not args.no_excel:
             try:
-                wb, ws, row, title, body = load_next_row()
-                if not row:
-                    log("대기 중인 업로드 건이 없습니다.")
-                    return
+                wb, ws, row, title_from_xlsx, body_from_xlsx = load_next_row()
+                if row:
+                    title = title_from_xlsx
+                    # 엑셀은 보통 텍스트일 테니, 최소 HTML wrapper로 감싸서 행간 고정
+                    body_html = f"<div style='font-size:15px; line-height:1.45;'>{(body_from_xlsx or '').replace('\\n','<br/>')}</div>"
+                else:
+                    log("대기 중인 업로드 건이 없습니다. → 테스트 글로 진행합니다.")
             except FileNotFoundError as e:
-                log(f"⚠ {e} → --no-excel처럼 테스트 데이터로 진행합니다.")
-                title = "테스트 제목입니다 (자동화)"
-                body = "테스트 본문 입니다.\n자동화 확인용."
+                log(f"⚠ {e} → 테스트 글로 진행합니다.")
 
         # 제목 입력
         ti = find_subject(drv)
@@ -415,7 +483,7 @@ def main():
         log("제목 입력 완료 ✓")
 
         # 본문 입력
-        set_post_body(drv, body)
+        set_post_body(drv, body_html)
 
         # 제출 버튼 찾기
         submit_btn = None
@@ -431,7 +499,6 @@ def main():
         if submit_btn is None:
             raise RuntimeError("제출 버튼을 찾을 수 없습니다.")
 
-        # 등록 직전 동기화
         sync_editor_before_submit(drv)
 
         # JS 클릭
