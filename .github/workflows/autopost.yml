@@ -1,0 +1,46 @@
+name: Zaeda Auto Post
+
+on:
+  schedule:
+    # 주중(월~금) 한국시간 오전 9시 = UTC 00:00
+    - cron: '0 0 * * 1-5'
+  workflow_dispatch:  # 수동 실행 버튼도 활성화
+
+jobs:
+  autopost:
+    runs-on: ubuntu-latest
+
+    # ✅ Variable 읽기/쓰기 권한 필수
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: Chrome 설치
+        uses: browser-actions/setup-chrome@v1
+
+      - name: 자동 포스팅 실행
+        env:
+          ZAEDA_ID: ${{ secrets.ZAEDA_ID }}
+          ZAEDA_PW: ${{ secrets.ZAEDA_PW }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}       # 자동 제공 - 별도 설정 불필요
+          GITHUB_REPOSITORY: ${{ github.repository }}     # 자동 제공 - 별도 설정 불필요
+        run: |
+          cd tools
+          python auto_write.py --headless --close
+
+      - name: 실패 시 로그 출력
+        if: failure()
+        run: echo "❌ 자동 포스팅 실패. Actions 탭에서 로그를 확인하세요."

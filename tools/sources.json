@@ -1,0 +1,26 @@
+[
+  {
+    "id": "who_obesity",
+    "title": "WHO - Obesity and overweight (Fact sheet)",
+    "url": "https://www.who.int/news-room/fact-sheets/detail/obesity-and-overweight",
+    "tags": ["비만", "체중", "식단", "운동", "대사"]
+  },
+  {
+    "id": "cdc_sleep",
+    "title": "CDC - About Sleep",
+    "url": "https://www.cdc.gov/sleep/about_sleep/index.html",
+    "tags": ["수면", "호르몬", "식욕", "피로"]
+  },
+  {
+    "id": "nhs_weight",
+    "title": "NHS - Losing weight",
+    "url": "https://www.nhs.uk/live-well/healthy-weight/losing-weight/",
+    "tags": ["체중감량", "식단", "운동", "생활습관"]
+  },
+  {
+    "id": "harvard_sugar",
+    "title": "Harvard T.H. Chan - Added Sugar",
+    "url": "https://nutritionsource.hsph.harvard.edu/carbohydrates/added-sugar-in-the-diet/",
+    "tags": ["가공당", "혈당", "단음료", "식욕"]
+  }
+]
